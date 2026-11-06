@@ -25,6 +25,8 @@ const AREA_FILAS = {
   "Comissão": ["Lecom", "Sales Force"],
 };
 const OPERADORAS = ["Hapvida", "NDI SP", "NDI MG", "Clinipam", "Centro Clínico Gaúcho"];
+const TIPOS_SOLICITACAO = ["Assinatura", "Código de Custo", "Ajuste", "Código/Senha", "Baixa", "Carta"];
+const AREA_COM_TIPO = "Grandes Contratos"; // só nessa área o Tipo de Solicitação aparece e é obrigatório
 
 const STATUS_LABEL = {
   rascunho: "Rascunho",
@@ -106,6 +108,27 @@ function formatTicket(n) {
   if (n == null) return "—";
   return "#" + String(n).padStart(4, "0");
 }
+function exportCsv(items, accounts, prefix) {
+  const accMap = {};
+  (accounts || []).forEach((a) => { accMap[a.email] = a; });
+  const headers = ["Ticket", "Solicitante", "Área", "Tipo de Solicitação", "Fila", "Número da demanda", "Operadora", "Justificativa", "Status", "Criado em", "Enviado em", "Atendido em", "Rejeitado em", "Motivo da rejeição"];
+  const rows = items.map((p) => [
+    formatTicket(p.ticketNumber),
+    (accMap[p.solicitanteId] && accMap[p.solicitanteId].name) || p.solicitanteId,
+    p.area, p.tipoSolicitacao || "", p.fila, p.numeroDemanda, p.operadora, p.justificativa, STATUS_LABEL[p.status],
+    fmtDate(p.createdAt), fmtDate(p.enviadoAt), fmtDate(p.atendidoAt), fmtDate(p.rejeitadoAt), p.motivoRejeicao || "",
+  ]);
+  const csv = [headers, ...rows].map((r) => r.map(csvEscape).join(";")).join("\r\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = prefix + "-" + new Date().toISOString().slice(0, 10) + ".csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
 function playChime() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -151,6 +174,7 @@ function rowToPriority(row) {
     ticketNumber: row.ticket_number,
     ordem: row.ordem,
     area: row.area,
+    tipoSolicitacao: row.tipo_solicitacao || "",
     fila: row.fila,
     numeroDemanda: row.numero_demanda,
     operadora: row.operadora,
@@ -209,7 +233,7 @@ export default function PortalPrioridadesCSC() {
   const isAdmin = !!account && account.role === "administrador";
   const isGestorOrAdmin = !!account && (account.role === "administrador" || account.role === "gestor");
   const isPriorizador = !!account && account.role === "priorizador";
-  const canReorder = isAdmin || isPriorizador;
+  const canReorder = isGestorOrAdmin || isPriorizador; // Priorizador, Gestor e Administrador
   const unreadCount = notifications.filter((n) => new Date(n.created_at).getTime() > lastSeenNotif).length;
 
   function showToast(msg) {
@@ -338,7 +362,7 @@ export default function PortalPrioridadesCSC() {
     const now = new Date().toISOString();
     if (editDraftId) {
       const patch = {
-        area: form.area, fila: form.fila, numero_demanda: form.numeroDemanda, operadora: form.operadora,
+        area: form.area, tipo_solicitacao: form.tipoSolicitacao || null, fila: form.fila, numero_demanda: form.numeroDemanda, operadora: form.operadora,
         justificativa: form.justificativa, status, updated_at: now,
       };
       if (status === "solicitado") patch.enviado_at = now;
@@ -347,7 +371,7 @@ export default function PortalPrioridadesCSC() {
       if (!data || data.length === 0) { showToast("Nada foi salvo (permissão do Supabase?). Confira o supabase-schema.sql."); return; }
     } else {
       const row = {
-        area: form.area, fila: form.fila, numero_demanda: form.numeroDemanda, operadora: form.operadora,
+        area: form.area, tipo_solicitacao: form.tipoSolicitacao || null, fila: form.fila, numero_demanda: form.numeroDemanda, operadora: form.operadora,
         justificativa: form.justificativa, status, solicitante_id: account.email,
       };
       if (status === "solicitado") row.enviado_at = now;
@@ -384,8 +408,9 @@ export default function PortalPrioridadesCSC() {
     showToast("Prioridade rejeitada.");
     await loadAppData();
   }
-  async function moveInQueue(id, direction) {
-    const open = priorities.filter((p) => p.status === "solicitado").slice().sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
+  async function moveInQueue(id, direction, list) {
+    // troca de posição com o vizinho da lista que está na tela (fila filtrada ou "minhas abertas")
+    const open = (list || priorities.filter((p) => p.status === "solicitado")).slice().sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
     const idx = open.findIndex((p) => p.id === id);
     if (idx < 0) return;
     const swapIdx = direction === "up" ? idx - 1 : idx + 1;
@@ -560,12 +585,15 @@ export default function PortalPrioridadesCSC() {
                 {view === "lista" && (
                   <ListaPrioridades
                     items={priorities.filter((p) => p.solicitanteId === account.email)}
+                    accounts={accounts}
                     solicitanteName={account.name}
                     statusFilter={listStatusFilter}
                     setStatusFilter={setListStatusFilter}
                     onEdit={(id) => { setEditDraftId(id); setView("nova"); }}
                     onDelete={(id) => setConfirmState({ title: "Excluir prioridade?", msg: "Essa ação não pode ser desfeita.", onConfirm: () => deletePriority(id) })}
                     onMotivo={(p) => setMotivoView(p)}
+                    onMoveUp={(id, list) => moveInQueue(id, "up", list)}
+                    onMoveDown={(id, list) => moveInQueue(id, "down", list)}
                   />
                 )}
                 {view === "fila" && (
@@ -578,8 +606,8 @@ export default function PortalPrioridadesCSC() {
                     canReorder={canReorder}
                     onAtender={(id) => setConfirmState({ title: "Finalizar atendimento?", msg: "A prioridade será marcada como atendida.", onConfirm: () => atender(id) })}
                     onRejeitar={(id) => setRejectFor(id)}
-                    onMoveUp={(id) => moveInQueue(id, "up")}
-                    onMoveDown={(id) => moveInQueue(id, "down")}
+                    onMoveUp={(id, list) => moveInQueue(id, "up", list)}
+                    onMoveDown={(id, list) => moveInQueue(id, "down", list)}
                   />
                 )}
                 {view === "atendimento" && isGestorOrAdmin && (
@@ -592,8 +620,8 @@ export default function PortalPrioridadesCSC() {
                     canReorder={canReorder}
                     onAtender={(id) => setConfirmState({ title: "Finalizar atendimento?", msg: "A prioridade será marcada como atendida.", onConfirm: () => atender(id) })}
                     onRejeitar={(id) => setRejectFor(id)}
-                    onMoveUp={(id) => moveInQueue(id, "up")}
-                    onMoveDown={(id) => moveInQueue(id, "down")}
+                    onMoveUp={(id, list) => moveInQueue(id, "up", list)}
+                    onMoveDown={(id, list) => moveInQueue(id, "down", list)}
                   />
                 )}
                 {view === "extracao" && isGestorOrAdmin && (
@@ -735,6 +763,8 @@ function NovaPrioridadeForm({ draft, onCancel, onSaveDraft, onSend, showToast })
   const [numero, setNumero] = useState(draft?.numeroDemanda || "");
   const [operadora, setOperadora] = useState(draft?.operadora || OPERADORAS[0]);
   const [justificativa, setJustificativa] = useState(draft?.justificativa || "");
+  const [tipo, setTipo] = useState(draft?.tipoSolicitacao || "");
+  const needsTipo = area === AREA_COM_TIPO;
 
   useEffect(() => {
     const allowed = AREA_FILAS[area] || FILAS;
@@ -743,7 +773,7 @@ function NovaPrioridadeForm({ draft, onCancel, onSaveDraft, onSend, showToast })
   }, [area]);
 
   function readForm() {
-    return { area, fila, numeroDemanda: numero.trim(), operadora, justificativa: justificativa.trim() };
+    return { area, tipoSolicitacao: needsTipo ? tipo : "", fila, numeroDemanda: numero.trim(), operadora, justificativa: justificativa.trim() };
   }
 
   return (
@@ -764,6 +794,16 @@ function NovaPrioridadeForm({ draft, onCancel, onSaveDraft, onSend, showToast })
             <select value={operadora} onChange={(e) => setOperadora(e.target.value)}>{OPERADORAS.map((o) => <option key={o} value={o}>{o}</option>)}</select>
           </Field>
         </div>
+        {needsTipo && (
+          <div style={S.grid4}>
+            <Field label="Tipo de Solicitação *">
+              <select value={tipo} onChange={(e) => setTipo(e.target.value)}>
+                <option value="">Selecione…</option>
+                {TIPOS_SOLICITACAO.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </Field>
+          </div>
+        )}
         <Field label="Justificativa">
           <textarea placeholder="Explique o motivo da priorização…" value={justificativa} onChange={(e) => setJustificativa(e.target.value)} />
         </Field>
@@ -776,6 +816,7 @@ function NovaPrioridadeForm({ draft, onCancel, onSaveDraft, onSend, showToast })
           }}>Salvar rascunho</button>
           <button style={S.btn} onClick={() => {
             const fd = readForm();
+            if (needsTipo && !fd.tipoSolicitacao) { showToast("Informe o Tipo de Solicitação (obrigatório para Grandes Contratos)."); return; }
             if (!fd.numeroDemanda) { showToast("Informe o número da demanda."); return; }
             if (!fd.justificativa) { showToast("Informe a justificativa."); return; }
             onSend(fd);
@@ -788,8 +829,13 @@ function NovaPrioridadeForm({ draft, onCancel, onSaveDraft, onSend, showToast })
 
 // ---------------- Lista de Prioridades ----------------
 
-function ListaPrioridades({ items, solicitanteName, statusFilter, setStatusFilter, onEdit, onDelete, onMotivo }) {
-  const filtered = statusFilter ? items.filter((p) => p.status === statusFilter) : items;
+function ListaPrioridades({ items, accounts, solicitanteName, statusFilter, setStatusFilter, onEdit, onDelete, onMotivo, onMoveUp, onMoveDown }) {
+  // abertas (Solicitado) primeiro, na ordem da fila; depois o resto, mais recentes primeiro
+  const byOrder = (a, b) => (a.ordem || 0) - (b.ordem || 0);
+  const ownOpen = items.filter((p) => p.status === "solicitado").sort(byOrder);
+  const others = items.filter((p) => p.status !== "solicitado").sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const sorted = [...ownOpen, ...others];
+  const filtered = statusFilter ? sorted.filter((p) => p.status === statusFilter) : sorted;
   return (
     <>
       <div style={S.filters}>
@@ -799,22 +845,33 @@ function ListaPrioridades({ items, solicitanteName, statusFilter, setStatusFilte
             {Object.keys(STATUS_LABEL).map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
           </select>
         </Field>
+        <button style={{ ...S.btn, marginBottom: 16 }} onClick={() => exportCsv(filtered, accounts, "minhas-solicitacoes")} disabled={!filtered.length}>Extrair Analítico ({filtered.length})</button>
       </div>
       {!filtered.length ? (
         <EmptyState title="Nenhuma prioridade encontrada" sub='Use "Solicitar Nova Prioridade" para abrir uma nova demanda.' />
       ) : (
         <div style={{ ...S.card, overflowX: "auto" }}>
           <table style={S.table}>
-            <thead><tr>{["Ticket", "Solicitante", "Área", "Fila", "Demanda", "Operadora", "Status", "Criado em", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Ordem", "Ticket", "Solicitante", "Área", "Tipo", "Fila", "Demanda", "Operadora", "Status", "Criado em", ""].map((h, i) => <th key={i} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
               {filtered.map((p) => {
                 const canDelete = p.status !== "atendida";
                 const canEdit = p.status === "rascunho";
+                const pos = ownOpen.findIndex((x) => x.id === p.id);
                 return (
                   <tr key={p.id}>
+                    <td style={{ ...S.td, whiteSpace: "nowrap" }}>
+                      {pos >= 0 && (
+                        <>
+                          <button style={S.btnGhostSm} disabled={pos === 0} onClick={() => onMoveUp(p.id, ownOpen)} title="Subir">▲</button>
+                          <button style={S.btnGhostSm} disabled={pos === ownOpen.length - 1} onClick={() => onMoveDown(p.id, ownOpen)} title="Descer">▼</button>
+                        </>
+                      )}
+                    </td>
                     <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, color: TOKENS.hv700 }}>{formatTicket(p.ticketNumber)}</td>
                     <td style={S.td}>{solicitanteName}</td>
                     <td style={S.td}>{p.area}</td>
+                    <td style={S.td}>{p.tipoSolicitacao || "—"}</td>
                     <td style={S.td}>{p.fila}</td>
                     <td style={{ ...S.td, fontVariantNumeric: "tabular-nums" }}>{p.numeroDemanda}</td>
                     <td style={S.td}>{p.operadora}</td>
@@ -876,21 +933,22 @@ function FilaPrioridades({ items, accounts, filters, setFilters, canFinalize, ca
       ) : (
         <div style={{ ...S.card, overflowX: "auto" }}>
           <table style={S.table}>
-            <thead><tr>{["", "Ticket", "Solicitante", "Área", "Fila", "Demanda", "Operadora", "Justificativa", "Status", "Data", ""].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["", "Ticket", "Solicitante", "Área", "Tipo", "Fila", "Demanda", "Operadora", "Justificativa", "Status", "Data", ""].map((h, i) => <th key={i} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
               {filtered.map((p, idx) => (
                 <tr key={p.id}>
                   <td style={{ ...S.td, whiteSpace: "nowrap" }}>
                     {canReorder && (
                       <>
-                        <button style={S.btnGhostSm} disabled={idx === 0} onClick={() => onMoveUp(p.id)} title="Subir">▲</button>
-                        <button style={S.btnGhostSm} disabled={idx === filtered.length - 1} onClick={() => onMoveDown(p.id)} title="Descer">▼</button>
+                        <button style={S.btnGhostSm} disabled={idx === 0} onClick={() => onMoveUp(p.id, filtered)} title="Subir">▲</button>
+                        <button style={S.btnGhostSm} disabled={idx === filtered.length - 1} onClick={() => onMoveDown(p.id, filtered)} title="Descer">▼</button>
                       </>
                     )}
                   </td>
                   <td style={{ ...S.td, fontVariantNumeric: "tabular-nums", fontWeight: 700, color: TOKENS.hv700 }}>{formatTicket(p.ticketNumber)}</td>
                   <td style={S.td}>{(accMap[p.solicitanteId] && accMap[p.solicitanteId].name) || p.solicitanteId || "—"}</td>
                   <td style={S.td}>{p.area}</td>
+                  <td style={S.td}>{p.tipoSolicitacao || "—"}</td>
                   <td style={S.td}>{p.fila}</td>
                   <td style={{ ...S.td, fontVariantNumeric: "tabular-nums" }}>{p.numeroDemanda}</td>
                   <td style={S.td}>{p.operadora}</td>
@@ -934,23 +992,7 @@ function ExtracaoAnalitico({ items, accounts }) {
   if (filters.to) { const t = new Date(filters.to + "T23:59:59").getTime(); filtered = filtered.filter((p) => (p.createdAt || 0) <= t); }
 
   function baixarCsv() {
-    const headers = ["Ticket", "Solicitante", "Área", "Fila", "Número da demanda", "Operadora", "Justificativa", "Status", "Criado em", "Enviado em", "Atendido em", "Rejeitado em", "Motivo da rejeição"];
-    const rows = filtered.map((p) => [
-      formatTicket(p.ticketNumber),
-      (accMap[p.solicitanteId] && accMap[p.solicitanteId].name) || p.solicitanteId,
-      p.area, p.fila, p.numeroDemanda, p.operadora, p.justificativa, STATUS_LABEL[p.status],
-      fmtDate(p.createdAt), fmtDate(p.enviadoAt), fmtDate(p.atendidoAt), fmtDate(p.rejeitadoAt), p.motivoRejeicao || "",
-    ]);
-    const csv = [headers, ...rows].map((r) => r.map(csvEscape).join(";")).join("\r\n");
-    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "extracao-prioridades-" + new Date().toISOString().slice(0, 10) + ".csv";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    exportCsv(filtered, accounts, "extracao-prioridades");
   }
 
   return (
@@ -1069,7 +1111,12 @@ function Acessos({ accounts, currentEmail, newUserError, onCreate, onResetPasswo
 
 // ---------------- Dashboard ----------------
 
-function Dashboard({ items, accounts }) {
+function Dashboard({ items: allItems, accounts }) {
+  const [dashFilters, setDashFilters] = useState({ solicitante: "", fila: "" });
+  let items = allItems;
+  if (dashFilters.solicitante) items = items.filter((p) => p.solicitanteId === dashFilters.solicitante);
+  if (dashFilters.fila) items = items.filter((p) => p.fila === dashFilters.fila);
+  const dashSolicitantes = [...new Set(allItems.map((p) => p.solicitanteId))];
   const counts = { rascunho: 0, solicitado: 0, atendida: 0, rejeitado: 0 };
   items.forEach((p) => { if (counts[p.status] !== undefined) counts[p.status]++; });
   const total = items.length;
@@ -1106,6 +1153,20 @@ function Dashboard({ items, accounts }) {
 
   return (
     <>
+      <div style={S.filters}>
+        <Field label="Solicitante">
+          <select value={dashFilters.solicitante} onChange={(e) => setDashFilters({ ...dashFilters, solicitante: e.target.value })}>
+            <option value="">Todos</option>
+            {dashSolicitantes.map((id) => <option key={id} value={id}>{(accMap[id] && accMap[id].name) || id}</option>)}
+          </select>
+        </Field>
+        <Field label="Fila">
+          <select value={dashFilters.fila} onChange={(e) => setDashFilters({ ...dashFilters, fila: e.target.value })}>
+            <option value="">Todas</option>
+            {FILAS.map((f) => <option key={f} value={f}>{f}</option>)}
+          </select>
+        </Field>
+      </div>
       <div style={S.kpis}>
         <Kpi num={total} lbl="Total de demandas" />
         <Kpi num={open} lbl="Em aberto" />
