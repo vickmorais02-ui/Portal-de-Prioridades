@@ -26,6 +26,7 @@ const AREA_FILAS = {
 };
 const OPERADORAS = ["Hapvida", "NDI SP", "NDI MG", "Clinipam", "Centro Clínico Gaúcho"];
 const TIPOS_SOLICITACAO = ["Assinatura", "Código de Custo", "Ajuste", "Código/Senha", "Baixa", "Carta"];
+const TODAS_AREAS = "TODOS"; // visão de fila liberada por usuário: TODOS ou uma/várias áreas
 const AREA_COM_TIPO = "Grandes Contratos"; // só nessa área o Tipo de Solicitação aparece e é obrigatório
 
 const STATUS_LABEL = {
@@ -129,6 +130,19 @@ function exportCsv(items, accounts, prefix) {
   a.remove();
   URL.revokeObjectURL(url);
 }
+function userAreas(acc) {
+  const a = acc && Array.isArray(acc.areas) && acc.areas.length ? acc.areas : [TODAS_AREAS];
+  return a;
+}
+function canSeeArea(areas, area) {
+  return areas.includes(TODAS_AREAS) || areas.includes(area);
+}
+function toggleArea(current, opt) {
+  if (opt === TODAS_AREAS) return [TODAS_AREAS];
+  const base = current.filter((x) => x !== TODAS_AREAS);
+  const next = base.includes(opt) ? base.filter((x) => x !== opt) : [...base, opt];
+  return next.length ? next : [TODAS_AREAS];
+}
 function playChime() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -166,7 +180,7 @@ function fmtRelative(ts) {
 // linhas do banco (snake_case) <-> objetos usados na tela (camelCase)
 
 function rowToAccount(row) {
-  return { email: row.email, name: row.name, role: row.role, mustChangePassword: row.must_change_password };
+  return { email: row.email, name: row.name, role: row.role, mustChangePassword: row.must_change_password, areas: row.areas || [TODAS_AREAS] };
 }
 function rowToPriority(row) {
   return {
@@ -191,7 +205,7 @@ function rowToPriority(row) {
 }
 
 async function fetchDirectory() {
-  const { data, error } = await supabase.from("accounts").select("email,name,role,must_change_password").order("name");
+  const { data, error } = await supabase.from("accounts").select("email,name,role,must_change_password,areas").order("name");
   if (error) { console.error(error); return []; }
   return data.map(rowToAccount);
 }
@@ -233,6 +247,7 @@ export default function PortalPrioridadesCSC() {
   const isAdmin = !!account && account.role === "administrador";
   const isGestorOrAdmin = !!account && (account.role === "administrador" || account.role === "gestor");
   const isPriorizador = !!account && account.role === "priorizador";
+  const myAreas = userAreas(accounts.find((a) => a.email === account?.email) || account);
   const canReorder = isGestorOrAdmin || isPriorizador; // Priorizador, Gestor e Administrador
   const unreadCount = notifications.filter((n) => new Date(n.created_at).getTime() > lastSeenNotif).length;
 
@@ -285,7 +300,7 @@ export default function PortalPrioridadesCSC() {
       let saved = null;
       try { saved = localStorage.getItem(SESSION_KEY); } catch (e) {}
       if (saved) {
-        const { data } = await supabase.from("accounts").select("email,name,role,must_change_password").eq("email", saved).maybeSingle();
+        const { data } = await supabase.from("accounts").select("email,name,role,must_change_password,areas").eq("email", saved).maybeSingle();
         if (data) {
           const acc = rowToAccount(data);
           setAccount(acc);
@@ -429,14 +444,14 @@ export default function PortalPrioridadesCSC() {
 
   // ---------------- ações de contas (Acessos) ----------------
 
-  async function createAccount(email, name, role) {
+  async function createAccount(email, name, role, areas) {
     const e = (email || "").trim().toLowerCase();
     const n = (name || "").trim();
     if (!e || !n) { setNewUserError("Informe nome e e-mail."); return; }
     const { data: existing } = await supabase.from("accounts").select("email").eq("email", e).maybeSingle();
     if (existing) { setNewUserError("Já existe uma conta com este e-mail."); return; }
     const defaultHash = await sha256Hex(DEFAULT_PASSWORD);
-    const { data, error } = await supabase.from("accounts").insert({ email: e, name: n, role, password_hash: defaultHash, must_change_password: true }).select();
+    const { data, error } = await supabase.from("accounts").insert({ email: e, name: n, role, areas: areas && areas.length ? areas : [TODAS_AREAS], password_hash: defaultHash, must_change_password: true }).select();
     if (error) { setNewUserError("Não foi possível criar o usuário (" + error.message + ")."); return; }
     if (!data || data.length === 0) { setNewUserError("O usuário não foi salvo (permissão do Supabase?). Confira o supabase-schema.sql."); return; }
     setNewUserError("");
@@ -456,6 +471,13 @@ export default function PortalPrioridadesCSC() {
     if (error) { showToast("Não foi possível atualizar o perfil."); return; }
     if (!data || data.length === 0) { showToast("Nada foi salvo (permissão do Supabase?). Confira o supabase-schema.sql."); return; }
     showToast("Perfil atualizado.");
+    await loadAppData();
+  }
+  async function changeAccountAreas(email, areas) {
+    const { data, error } = await supabase.from("accounts").update({ areas }).eq("email", email).select();
+    if (error) { showToast("Não foi possível atualizar a fila de visão (" + error.message + ")."); return; }
+    if (!data || data.length === 0) { showToast("Nada foi salvo (permissão do Supabase?). Confira o supabase-schema.sql."); return; }
+    showToast("Fila de visão atualizada.");
     await loadAppData();
   }
   async function deleteAccount(email) {
@@ -600,10 +622,13 @@ export default function PortalPrioridadesCSC() {
                   <FilaPrioridades
                     items={priorities}
                     accounts={accounts}
+                    allowedAreas={myAreas}
                     filters={queueFilters}
                     setFilters={setQueueFilters}
                     canFinalize={false}
                     canReorder={canReorder}
+                    canDelete={isAdmin}
+                    onDelete={(id) => setConfirmState({ title: "Excluir demanda?", msg: "A demanda será apagada definitivamente, de qualquer status. Essa ação não pode ser desfeita.", onConfirm: () => deletePriority(id) })}
                     onAtender={(id) => setConfirmState({ title: "Finalizar atendimento?", msg: "A prioridade será marcada como atendida.", onConfirm: () => atender(id) })}
                     onRejeitar={(id) => setRejectFor(id)}
                     onMoveUp={(id, list) => moveInQueue(id, "up", list)}
@@ -614,10 +639,13 @@ export default function PortalPrioridadesCSC() {
                   <FilaPrioridades
                     items={priorities}
                     accounts={accounts}
+                    allowedAreas={myAreas}
                     filters={atendimentoFilters}
                     setFilters={setAtendimentoFilters}
                     canFinalize={isGestorOrAdmin}
                     canReorder={canReorder}
+                    canDelete={isAdmin}
+                    onDelete={(id) => setConfirmState({ title: "Excluir demanda?", msg: "A demanda será apagada definitivamente, de qualquer status. Essa ação não pode ser desfeita.", onConfirm: () => deletePriority(id) })}
                     onAtender={(id) => setConfirmState({ title: "Finalizar atendimento?", msg: "A prioridade será marcada como atendida.", onConfirm: () => atender(id) })}
                     onRejeitar={(id) => setRejectFor(id)}
                     onMoveUp={(id, list) => moveInQueue(id, "up", list)}
@@ -625,7 +653,7 @@ export default function PortalPrioridadesCSC() {
                   />
                 )}
                 {view === "extracao" && isGestorOrAdmin && (
-                  <ExtracaoAnalitico items={priorities} accounts={accounts} />
+                  <ExtracaoAnalitico items={priorities} accounts={accounts} canDelete={isAdmin} onDelete={(id) => setConfirmState({ title: "Excluir demanda?", msg: "A demanda será apagada definitivamente, de qualquer status. Essa ação não pode ser desfeita.", onConfirm: () => deletePriority(id) })} />
                 )}
                 {view === "acessos" && isAdmin && (
                   <Acessos
@@ -635,6 +663,7 @@ export default function PortalPrioridadesCSC() {
                     onCreate={createAccount}
                     onResetPassword={(email) => setConfirmState({ title: "Redefinir senha?", msg: "O usuário voltará a usar a senha padrão CSCHAP123 e precisará trocá-la no próximo acesso.", onConfirm: () => resetAccountPassword(email) })}
                     onChangeRole={changeAccountRole}
+                    onChangeAreas={changeAccountAreas}
                     onRemove={(email) => setConfirmState({ title: "Remover usuário?", msg: "Essa pessoa perderá o acesso à ferramenta imediatamente.", onConfirm: () => deleteAccount(email) })}
                   />
                 )}
@@ -895,11 +924,11 @@ function ListaPrioridades({ items, accounts, solicitanteName, statusFilter, setS
 
 // ---------------- Fila de Prioridades ----------------
 
-function FilaPrioridades({ items, accounts, filters, setFilters, canFinalize, canReorder, onAtender, onRejeitar, onMoveUp, onMoveDown }) {
+function FilaPrioridades({ items, accounts, allowedAreas, filters, setFilters, canFinalize, canReorder, canDelete, onDelete, onAtender, onRejeitar, onMoveUp, onMoveDown }) {
   const accMap = {};
   accounts.forEach((a) => { accMap[a.email] = a; });
 
-  const open = items.filter((p) => p.status === "solicitado");
+  const open = items.filter((p) => p.status === "solicitado" && canSeeArea(allowedAreas || [TODAS_AREAS], p.area));
   let filtered = open;
   if (filters.fila) filtered = filtered.filter((p) => p.fila === filters.fila);
   if (filters.solicitante) filtered = filtered.filter((p) => p.solicitanteId === filters.solicitante);
@@ -964,6 +993,7 @@ function FilaPrioridades({ items, accounts, filters, setFilters, canFinalize, ca
                         <button style={S.btnSecondarySm} onClick={() => onRejeitar(p.id)}>Rejeitar</button>
                       </>
                     )}
+                    {canDelete && <button style={S.btnGhostSm} onClick={() => onDelete(p.id)}>Excluir</button>}
                   </td>
                 </tr>
               ))}
@@ -977,7 +1007,7 @@ function FilaPrioridades({ items, accounts, filters, setFilters, canFinalize, ca
 
 // ---------------- Extração do Analítico ----------------
 
-function ExtracaoAnalitico({ items, accounts }) {
+function ExtracaoAnalitico({ items, accounts, canDelete, onDelete }) {
   const accMap = {};
   accounts.forEach((a) => { accMap[a.email] = a; });
   const solicitanteIds = [...new Set(items.map((p) => p.solicitanteId))];
@@ -1026,7 +1056,7 @@ function ExtracaoAnalitico({ items, accounts }) {
       ) : (
         <div style={{ ...S.card, overflowX: "auto" }}>
           <table style={S.table}>
-            <thead><tr>{["Ticket", "Solicitante", "Área", "Fila", "Demanda", "Operadora", "Status", "Criado em"].map((h) => <th key={h} style={S.th}>{h}</th>)}</tr></thead>
+            <thead><tr>{["Ticket", "Solicitante", "Área", "Fila", "Demanda", "Operadora", "Status", "Criado em", ""].map((h, i) => <th key={i} style={S.th}>{h}</th>)}</tr></thead>
             <tbody>
               {filtered.map((p) => (
                 <tr key={p.id}>
@@ -1038,6 +1068,7 @@ function ExtracaoAnalitico({ items, accounts }) {
                   <td style={S.td}>{p.operadora}</td>
                   <td style={S.td}><StatusPill status={p.status} /></td>
                   <td style={{ ...S.td, color: TOKENS.inkSoft, whiteSpace: "nowrap" }}>{fmtDate(p.createdAt)}</td>
+                  <td style={{ ...S.td, textAlign: "right" }}>{canDelete && <button style={S.btnGhostSm} onClick={() => onDelete(p.id)}>Excluir</button>}</td>
                 </tr>
               ))}
             </tbody>
@@ -1050,8 +1081,25 @@ function ExtracaoAnalitico({ items, accounts }) {
 
 // ---------------- Acessos ----------------
 
-function Acessos({ accounts, currentEmail, newUserError, onCreate, onResetPassword, onChangeRole, onRemove }) {
+function AreaPicker({ value, onChange }) {
+  const opts = [TODAS_AREAS, ...AREAS];
+  return (
+    <div style={S.areaPicker}>
+      {opts.map((o) => {
+        const on = value.includes(o);
+        return (
+          <button key={o} type="button" style={{ ...S.areaChip, ...(on ? S.areaChipOn : null) }} onClick={() => onChange(toggleArea(value, o))}>
+            {on ? "✓ " : ""}{o === TODAS_AREAS ? "TODOS" : o}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Acessos({ accounts, currentEmail, newUserError, onCreate, onResetPassword, onChangeRole, onChangeAreas, onRemove }) {
   const [name, setName] = useState("");
+  const [areas, setAreas] = useState([TODAS_AREAS]);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("solicitante");
 
@@ -1059,7 +1107,7 @@ function Acessos({ accounts, currentEmail, newUserError, onCreate, onResetPasswo
     <>
       <div style={S.callout}>
         <b>Sobre esta lista</b>
-        Aqui você libera o acesso de quem pode entrar na ferramenta. Todo novo usuário recebe a senha padrão <b>CSCHAP123</b> e é obrigado a trocá-la no primeiro acesso.
+        Aqui você libera o acesso de quem pode entrar na ferramenta. Todo novo usuário recebe a senha padrão <b>CSCHAP123</b> e é obrigado a trocá-la no primeiro acesso. Em <b>Fila de visão</b>, marque TODOS ou uma ou mais áreas: a pessoa só verá na Fila de Prioridades e na Fila de Atendimento as demandas dessas áreas.
       </div>
       <div style={S.twoCol}>
         <div style={{ ...S.card, ...S.accentCard, padding: 20 }}>
@@ -1075,8 +1123,11 @@ function Acessos({ accounts, currentEmail, newUserError, onCreate, onResetPasswo
               <option value="administrador">Administrador</option>
             </select>
           </Field>
+          <Field label="Fila de visão (áreas)">
+            <AreaPicker value={areas} onChange={setAreas} />
+          </Field>
           <button style={{ ...S.btn, width: "100%", justifyContent: "center" }}
-            onClick={() => { onCreate(email, name, role); setName(""); setEmail(""); setRole("solicitante"); }}>
+            onClick={() => { onCreate(email, name, role, areas); setName(""); setEmail(""); setRole("solicitante"); setAreas([TODAS_AREAS]); }}>
             Adicionar usuário
           </button>
         </div>
@@ -1100,6 +1151,10 @@ function Acessos({ accounts, currentEmail, newUserError, onCreate, onResetPasswo
                 </select>
                 <button style={S.btnGhostSm} onClick={() => onResetPassword(a.email)}>Redefinir senha</button>
                 <button style={S.btnGhostSm} onClick={() => onRemove(a.email)}>Remover</button>
+                <div style={{ flexBasis: "100%", paddingLeft: 42 }}>
+                  <div style={S.rosterMeta}>Fila de visão:</div>
+                  <AreaPicker value={userAreas(a)} onChange={(v) => onChangeAreas(a.email, v)} />
+                </div>
               </div>
             ))}
           </div>
@@ -1413,6 +1468,9 @@ const S = {
   rosterRow: { display: "flex", alignItems: "center", gap: 12, padding: 12, borderBottom: `1px solid ${TOKENS.line}`, flexWrap: "wrap" },
   rosterName: { fontWeight: 700, fontSize: 13.5 },
   rosterMeta: { fontSize: 11.5, color: TOKENS.inkSoft },
+  areaPicker: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 },
+  areaChip: { padding: "5px 10px", borderRadius: 100, border: `1px solid ${TOKENS.line}`, background: "#fff", color: TOKENS.inkSoft, fontSize: 12, fontWeight: 600, cursor: "pointer" },
+  areaChipOn: { background: TOKENS.hv100, borderColor: TOKENS.hv500, color: TOKENS.hv700 },
   rosterSelect: { width: "auto", padding: "6px 8px", fontSize: 12 },
   avatarDotLight: { width: 30, height: 30, borderRadius: "50%", flex: "none", background: TOKENS.hv100, color: TOKENS.hv700, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 12.5, fontFamily: FONT },
 
